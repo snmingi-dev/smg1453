@@ -447,7 +447,7 @@ func bake_river_network(bake_cfg: Dictionary) -> Dictionary:
 		var cx: int = cur % cols
 		var cy: int = int(cur / cols)
 		var nd: int = dist[cur] + 1
-		for d in _grid_neighbors4():
+		for d in _grid_neighbors8():
 			var nx: int = cx + d.x
 			var ny: int = cy + d.y
 			if nx < 0 or ny < 0 or nx >= cols or ny >= rows:
@@ -478,22 +478,31 @@ func bake_river_network(bake_cfg: Dictionary) -> Dictionary:
 
 	var preserved_manual: int = 0
 	var removed_auto: int = 0
+	var removed_manual: int = 0
+	var removed_total: int = 0
+	var base_rivers: Array = []
 	if preserve_existing:
-		var keep: Array = []
 		for river_data in river_strokes:
 			var river: Dictionary = river_data
 			if bool(river.get("auto_generated", false)):
 				removed_auto += 1
+				removed_total += 1
 				continue
 			preserved_manual += 1
-			keep.append(river)
-		river_strokes = keep
+			base_rivers.append(river)
 	else:
-		removed_auto = river_strokes.size()
-		river_strokes.clear()
+		for river_data in river_strokes:
+			var river: Dictionary = river_data
+			if bool(river.get("auto_generated", false)):
+				removed_auto += 1
+			else:
+				removed_manual += 1
+			removed_total += 1
+
+	var working_rivers: Array = base_rivers.duplicate(true)
 
 	var channel_cells: Dictionary = {}
-	for river_data in river_strokes:
+	for river_data in working_rivers:
 		var river: Dictionary = river_data
 		var pts: PackedVector2Array = river.get("points", PackedVector2Array())
 		for k in _rasterize_river_cells(pts, cell_px, cols, rows):
@@ -501,10 +510,11 @@ func bake_river_network(bake_cfg: Dictionary) -> Dictionary:
 
 	var shuffled: Array = _shuffled_keys(candidates, rng)
 	var source_count: int = int(round(float(shuffled.size()) * (density_pct / 100.0)))
-	source_count = clampi(source_count, 1, shuffled.size())
+	var max_sources: int = max(24, int(round(float(max(cols, rows)) * 0.5)))
+	source_count = clampi(source_count, 1, min(shuffled.size(), max_sources))
 
 	var merge_radius: int = clampi(int(round(lerpf(1.0, 6.0, merge_pct / 100.0))), 1, 6)
-	var noise_amp: float = (noise_pct / 100.0) * max(0.0, float(max_dist) * 0.16)
+	var noise_amp: float = (noise_pct / 100.0) * 0.45
 	var max_steps: int = max(40, int(round(float(max(cols, rows)) * 1.8)))
 	var generated: int = 0
 
@@ -529,17 +539,17 @@ func bake_river_network(bake_cfg: Dictionary) -> Dictionary:
 		var entry: Dictionary = _build_baked_river_entry(world_points, width)
 		if bool(entry.get("ok", false)):
 			var river_entry: Dictionary = entry.get("river", {})
-			river_strokes.append(river_entry)
+			working_rivers.append(river_entry)
 			for k in _rasterize_river_cells(river_entry.get("points", PackedVector2Array()), cell_px, cols, rows):
 				channel_cells[k] = true
 			generated += 1
 			if delta_split:
 				for branch in _build_delta_branches(river_entry, rng):
-					river_strokes.append(branch)
+					working_rivers.append(branch)
+					for bk in _rasterize_river_cells(branch.get("points", PackedVector2Array()), cell_px, cols, rows):
+						channel_cells[bk] = true
 					generated += 1
 
-	_ensure_stroke_bounds_cache()
-	queue_redraw()
 	if generated <= 0:
 		return {
 			"ok": false,
@@ -547,14 +557,22 @@ func bake_river_network(bake_cfg: Dictionary) -> Dictionary:
 			"generated": 0,
 			"total": river_strokes.size(),
 			"preserved_manual": preserved_manual,
-			"removed_auto": removed_auto
+			"removed_auto": removed_auto,
+			"removed_manual": removed_manual,
+			"removed_total": removed_total
 		}
+
+	river_strokes = working_rivers
+	_ensure_stroke_bounds_cache()
+	queue_redraw()
 	return {
 		"ok": true,
 		"generated": generated,
 		"total": river_strokes.size(),
 		"preserved_manual": preserved_manual,
 		"removed_auto": removed_auto,
+		"removed_manual": removed_manual,
+		"removed_total": removed_total,
 		"message": "강 자동 생성 완료"
 	}
 
@@ -781,11 +799,24 @@ func _grid_neighbors4() -> Array:
 	return [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
 
 
+func _grid_neighbors8() -> Array:
+	return [
+		Vector2i(1, 0),
+		Vector2i(-1, 0),
+		Vector2i(0, 1),
+		Vector2i(0, -1),
+		Vector2i(1, 1),
+		Vector2i(1, -1),
+		Vector2i(-1, 1),
+		Vector2i(-1, -1)
+	]
+
+
 func _is_grid_coast_cell(cx: int, cy: int, cols: int, rows: int, land: PackedByteArray) -> bool:
 	var key: int = cy * cols + cx
 	if land[key] != 1:
 		return false
-	for d in _grid_neighbors4():
+	for d in _grid_neighbors8():
 		var nx: int = cx + d.x
 		var ny: int = cy + d.y
 		if nx < 0 or ny < 0 or nx >= cols or ny >= rows:
@@ -820,7 +851,7 @@ func _trace_river_path(source_key: int, cols: int, rows: int, land: PackedByteAr
 			break
 		var merged_key: int = _find_near_channel_key(current, cols, rows, channel_cells, merge_radius)
 		if merged_key >= 0 and merged_key != current and out.size() >= 3:
-			out.append(merged_key)
+			_append_grid_line_connection(out, current, merged_key, cols, rows)
 			break
 		var next_key: int = _pick_next_river_cell(current, cols, rows, land, dist, noise_amp, rng)
 		if next_key < 0:
@@ -832,6 +863,7 @@ func _trace_river_path(source_key: int, cols: int, rows: int, land: PackedByteAr
 func _pick_next_river_cell(current: int, cols: int, rows: int, land: PackedByteArray, dist: PackedInt32Array, noise_amp: float, rng: RandomNumberGenerator) -> int:
 	var cx: int = current % cols
 	var cy: int = int(current / cols)
+	var current_dist: int = dist[current]
 	var best_key: int = -1
 	var best_score: float = INF
 	for oy in range(-1, 2):
@@ -845,6 +877,8 @@ func _pick_next_river_cell(current: int, cols: int, rows: int, land: PackedByteA
 			var nk: int = ny * cols + nx
 			if land[nk] != 1:
 				continue
+			if dist[nk] >= current_dist:
+				continue
 			var score: float = float(dist[nk])
 			if noise_amp > 0.001:
 				score += rng.randf_range(-noise_amp, noise_amp)
@@ -853,9 +887,36 @@ func _pick_next_river_cell(current: int, cols: int, rows: int, land: PackedByteA
 				best_key = nk
 	if best_key < 0:
 		return -1
-	if dist[best_key] > dist[current] + 1:
-		return -1
 	return best_key
+
+
+func _append_grid_line_connection(path: Array, from_key: int, to_key: int, cols: int, rows: int) -> void:
+	var fx: int = from_key % cols
+	var fy: int = int(from_key / cols)
+	var tx: int = to_key % cols
+	var ty: int = int(to_key / cols)
+	var x: int = fx
+	var y: int = fy
+	var dx: int = abs(tx - fx)
+	var sx: int = 1 if fx < tx else -1
+	var dy: int = -abs(ty - fy)
+	var sy: int = 1 if fy < ty else -1
+	var err: int = dx + dy
+
+	while true:
+		if x >= 0 and y >= 0 and x < cols and y < rows:
+			var key: int = y * cols + x
+			if path.is_empty() or int(path[path.size() - 1]) != key:
+				path.append(key)
+		if x == tx and y == ty:
+			break
+		var e2: int = err * 2
+		if e2 >= dy:
+			err += dy
+			x += sx
+		if e2 <= dx:
+			err += dx
+			y += sy
 
 
 func _find_near_channel_key(center_key: int, cols: int, rows: int, channel_cells: Dictionary, radius: int) -> int:

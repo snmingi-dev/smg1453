@@ -1338,6 +1338,9 @@ func _on_bake_rivers_pressed() -> void:
 	var generated: int = int(result.get("generated", 0))
 	var preserved_manual: int = int(result.get("preserved_manual", 0))
 	var removed_auto: int = int(result.get("removed_auto", 0))
+	var removed_manual: int = int(result.get("removed_manual", 0))
+	var removed_total: int = int(result.get("removed_total", removed_auto + removed_manual))
+	var preserve_mode: bool = river_bake_preserve_toggle.button_pressed if is_instance_valid(river_bake_preserve_toggle) else true
 	if generated <= 0:
 		_set_status(str(result.get("message", "생성된 강이 없습니다. 밀도/내륙 비율을 조정해보세요.")))
 		return
@@ -1348,7 +1351,10 @@ func _on_bake_rivers_pressed() -> void:
 	cmd.after_snapshot_id = after
 	command_stack.push(cmd)
 	_mark_content_changed()
-	_set_status("강 자동 생성 완료: 신규 %d개 / 자동강 교체 %d개 / 수동강 보호 %d개 / 총 %d개" % [generated, removed_auto, preserved_manual, int(result.get("total", generated))])
+	if preserve_mode:
+		_set_status("강 자동 생성 완료: 신규 %d개 / 자동강 교체 %d개 / 수동강 보호 %d개 / 총 %d개" % [generated, removed_auto, preserved_manual, int(result.get("total", generated))])
+	else:
+		_set_status("강 자동 생성 완료: 신규 %d개 / 기존 강 삭제 %d개(자동 %d, 수동 %d) / 총 %d개" % [generated, removed_total, removed_auto, removed_manual, int(result.get("total", generated))])
 
 
 func _on_country_selected(index: int) -> void:
